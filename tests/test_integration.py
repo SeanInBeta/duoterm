@@ -284,3 +284,38 @@ def test_offsets_inside_sequences_are_moved_past_them(tmp_path):
     t.log_path.write_bytes(data)
     assert [t._align(o) for o in (2, 3, 11, 12, 15, 16, 17, 20, 24)] == [2, 12, 12, 12, 17, 17, 17, 24, 24]
     assert t._log_since(5) == ("cd中efgh", len(data))
+
+
+def test_run_sets_up_integration_by_itself(shell_term, monkeypatch):
+    monkeypatch.setenv("DUOTERM_AUTO_INTEGRATE", "1")
+    assert shell_term.status()["shell_integration"] is False
+    r = shell_term.run("echo first; false")
+    assert (r.output, r.exit_code) == ("first", 1)
+    assert shell_term.status()["shell_integration"] is True
+    screen = shell_term.screen()
+    assert_clean(screen)
+    assert [row for row in screen.split("\n") if row.strip()][0].endswith(" echo first; false")
+    assert shell_term.run("echo second").output == "second"
+
+
+def test_auto_integration_tries_once_in_a_shell_that_cannot(tmp_path, monkeypatch):
+    from .conftest import _terminal
+
+    if subprocess.run(["sh", "-c", "[ -n \"$BASH_VERSION$ZSH_VERSION\" ]"]).returncode == 0:
+        pytest.skip("sh is bash/zsh here")
+    t, socket = _terminal(tmp_path, monkeypatch, "env PS1='$ ' sh")
+    monkeypatch.setenv("DUOTERM_AUTO_INTEGRATE", "1")
+    try:
+        assert t.run("echo a").output == "a"
+        assert t.run("echo b").output == "b"
+        assert t.screen().count('if [ -z "${__duoterm_si-}" ]') == 1  # one attempt, not one per command
+        assert t.status()["shell_integration"] is False
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
+
+
+def test_auto_integration_can_be_switched_off(term):
+    # conftest sets DUOTERM_AUTO_INTEGRATE=0
+    assert term.run("echo x").output == "x"
+    assert term.status()["shell_integration"] is False
+    assert "__RT_%s_%d__" in term.screen()
