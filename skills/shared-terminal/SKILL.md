@@ -37,7 +37,7 @@ a nested shell / `sudo -i` / another ssh hop), `run` falls back to appending a v
 `; printf '\n__RT_%s_%d__\n' <id> $?` marker, which clutters the user's screen but works the same.
 
 - If it is `False` at the user's normal prompt, suggest they run `duoterm integrate` (once per login,
-  bash >= 4.4 or zsh), or ask for approval and run it yourself; it types one setup line and erases it.
+  bash or zsh), or ask for approval and run it yourself; it types one setup line and erases it.
 - To make it permanent, `duoterm integrate --print` prints the code for the server's
   `~/.bashrc` / `~/.zshrc` (at the end of the file).
 - Do not try to "fix" the fallback by other means; both modes return output + `[exit N]` the same way.

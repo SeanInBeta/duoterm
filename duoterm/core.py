@@ -137,19 +137,37 @@ def _mark_exit(m: re.Match) -> int | None:
     return int(code) if code.isdigit() else None
 
 
-def render_marks(raw: bytes) -> bytes:
-    """Replace OSC 133 marks: a command's D mark becomes an `[exit N]` line, the rest vanish."""
-    out, pos, in_command = [], 0, False
+def _typed_after(raw: bytes) -> bool:
+    """Whether anything visible was printed in `raw` (e.g. after a prompt-end B mark)."""
+    return bool(clean_terminal_text(raw.decode("utf-8", "replace")).strip())
+
+
+def render_marks(raw: bytes, before: bytes = b"") -> bytes:
+    """Replace OSC 133 marks: a command's D mark becomes an `[exit N]` line, the rest vanish.
+
+    A D ends a command when a C came first, or (shells without C) something was typed after B.
+    `before` is log text preceding `raw`; its last mark says whether `raw` starts mid-command.
+    """
+    out, pos, in_command, prompt_end = [], 0, False, None
+    last = None
+    for last in _OSC133_RE.finditer(before):
+        pass
+    if last is not None:
+        in_command = last.group(1) == b"C"
+        prompt_end = 0 if last.group(1) == b"B" else None
     for m in _OSC133_RE.finditer(raw):
         out.append(raw[pos : m.start()])
         kind = m.group(1)
         if kind == b"C":
             in_command = True
+        elif kind == b"B":
+            prompt_end = m.end()
         elif kind == b"D":
             code = _mark_exit(m)
-            if in_command and code is not None:
+            typed = prompt_end is not None and _typed_after(raw[prompt_end : m.start()])
+            if (in_command or typed) and code is not None:
                 out.append(b"\n[exit %d]\n" % code)
-            in_command = False
+            in_command, prompt_end = False, None
         pos = m.end()
     out.append(raw[pos:])
     return b"".join(out)
@@ -202,19 +220,11 @@ def _wrap_command(command: str, marker_id: str | None = None) -> str:
     return f"{body}; {_marker_command(marker_id)}" if marker_id else body
 
 
-def _integrate_line(cursor_x: int, width: int) -> str:
+def _integrate_line(rows: int) -> str:
     """The setup code as one line, prefixed with a space (skips history where HISTCONTROL allows),
-    ending in a printf that moves up over the echoed line(s) and erases them one by one
+    ending in a printf that moves up `rows` rows (prompt + echo) and erases them one by one
     (erasing to the end of the screen from the top-left corner would push them into tmux history)."""
-    code, rows = " " + si.one_line(), 1
-    for _ in range(5):
-        line = f"{code}; printf '\\033[F\\033[2K%.0s' {{1..{rows}}}"
-        # Rows taken by prompt + echo, plus the one Enter moves to; readline/zle wrap a full row too.
-        needed = (cursor_x + len(line)) // max(width, 1) + 1
-        if needed == rows:
-            break
-        rows = needed
-    return line
+    return f" {si.one_line()}; printf '\\033[F\\033[2K%.0s' {{1..{rows}}}"
 
 
 def _parse_osc_run(raw: bytes, echo_lines: int) -> tuple[str, int | None]:
@@ -371,7 +381,8 @@ class Terminal:
         offset = self._align(offset)
         raw = self._read_log(offset)
         raw = raw[: complete_prefix(raw)]  # a half-written sequence waits for the next read
-        text = clean_terminal_text(render_marks(raw).decode("utf-8", "replace"))
+        before = self._read_log(max(0, offset - 4096), offset)
+        text = clean_terminal_text(render_marks(raw, before).decode("utf-8", "replace"))
         text = prettify(_EXIT_LINE_RE.sub(r"\n\1\n", _INTEGRATE_ECHO_RE.sub("", text)))
         return "\n".join(_strip_blank_edges(text.split("\n"))), offset + len(raw)
 
@@ -412,6 +423,10 @@ class Terminal:
         for last in _OSC133_RE.finditer(self._read_log(start, size)):
             pass
         if last is None or last.group(1) not in (b"A", b"B"):
+            return False, -1, size
+        if last.group(1) == b"B" and _typed_after(self._read_log(start + last.end(), size)):
+            # Output after the prompt's end: a command ran that the shell never reported
+            # (no C mark in bash < 4.4), e.g. ssh or sudo -i, and this is its prompt.
             return False, -1, size
         at = start + last.start()
         if at <= self._load_state().get("integration_lost_at", -1):
@@ -514,7 +529,18 @@ class Terminal:
         if not force:
             self._require_idle_prompt()
         info = tm.pane_info(self.session)
-        tm.send_literal(self.session, _integrate_line(int(info["cursor_x"]), int(info["pane_width"])))
+        top = int(info["history_size"]) + int(info["cursor_y"])
+        # Guess the rows the typed line takes if it wraps; then measure, since readline may also
+        # scroll it horizontally on one row. Retype with the right count if the guess was off.
+        rows = (int(info["cursor_x"]) + len(_integrate_line(9))) // max(int(info["pane_width"]), 1) + 1
+        for _ in range(3):
+            tm.send_literal(self.session, _integrate_line(rows))
+            used = self._settled_row() - top + 1
+            if used == rows:
+                break
+            tm.send_keys(self.session, "C-u")
+            self._settled_row()
+            rows = used
         tm.send_keys(self.session, "Enter")
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -522,9 +548,21 @@ class Terminal:
                 return "shell integration active: commands now run without a visible marker"
             time.sleep(POLL_INTERVAL)
         return (
-            "setup code sent, but no OSC 133 prompt mark appeared (needs bash >= 4.4 or zsh); "
+            "setup code sent, but no OSC 133 prompt mark appeared (needs bash or zsh); "
             "duoterm keeps using its visible printf marker in this shell"
         )
+
+    def _settled_row(self, timeout: float = 2.0) -> int:
+        """Absolute cursor row once the shell has stopped redrawing the input line."""
+        last, deadline = None, time.time() + timeout
+        while time.time() < deadline:
+            time.sleep(0.1)
+            info = tm.pane_info(self.session)
+            pos = (int(info["history_size"]) + int(info["cursor_y"]), info["cursor_x"])
+            if pos == last:
+                break
+            last = pos
+        return last[0]
 
     def wait(self, timeout: float = 60.0, idle: float = 2.0, pattern: str | None = None, max_lines: int = 200) -> Result:
         """Wait for the pending agent command, a regex in new output, or the terminal going quiet."""

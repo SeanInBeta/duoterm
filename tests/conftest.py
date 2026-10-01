@@ -10,6 +10,8 @@ from duoterm.core import Terminal
 SHELL = "env PS1='$ ' HISTFILE=/dev/null bash --norc --noprofile"
 SHELLS = {
     "bash": SHELL,
+    # bash < 4.4 (no PS0, e.g. CentOS 7's 4.2) mode of the integration, forced on this bash.
+    "bash-legacy": SHELL.replace("env ", "env DUOTERM_SI_LEGACY=1 ", 1),
     "zsh": "env PS1='%% ' HISTFILE=/dev/null zsh -f",
 }
 
@@ -36,10 +38,12 @@ def term(tmp_path, monkeypatch):
 @pytest.fixture(params=sorted(SHELLS))
 def shell_term(request, tmp_path, monkeypatch):
     """Like `term`, once per shell (zsh is skipped when it is not installed)."""
-    if shutil.which(request.param) is None:
-        pytest.skip(f"{request.param} not installed")
+    binary = request.param.split("-")[0]
+    if shutil.which(binary) is None:
+        pytest.skip(f"{binary} not installed")
     t, socket = _terminal(tmp_path, monkeypatch, SHELLS[request.param])
-    t.shell = request.param
+    t.shell = binary
+    t.shell_variant = request.param
     yield t
     subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)
 

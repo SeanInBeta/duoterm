@@ -81,6 +81,32 @@ def test_nested_shell_falls_back_until_it_exits(integrated):
     assert "echo back; printf" not in integrated.read(5)
 
 
+def test_nested_shell_with_exported_ps1_falls_back(integrated):
+    # An exported PS1 carries over into the nested shell; its prompt must not look integrated.
+    integrated.run("export PS1")
+    human_types(integrated, {"bash": "bash --norc --noprofile", "zsh": "zsh -f"}[integrated.shell])
+    integrated._wait_for_prompt(5)
+    time.sleep(0.3)
+    assert integrated.status()["shell_integration"] is False
+    assert integrated.run("echo nested; false").exit_code == 1
+    human_types(integrated, "exit")
+    time.sleep(0.5)
+    assert integrated.status()["shell_integration"] is True
+
+
+@pytest.mark.parametrize("hscroll", [False, True])
+def test_integrate_erases_exactly_its_own_line(term, hscroll):
+    # readline's horizontal-scroll-mode (seen on CentOS 7) keeps the long line on one row.
+    term.run("bind 'set horizontal-scroll-mode on'" if hscroll else "true")
+    for i in range(3):
+        term.run(f"echo keep-{i}")
+    assert "integration active" in term.integrate()
+    screen = term.screen()
+    assert all(f"\nkeep-{i}\n" in screen for i in range(3))
+    assert "__duoterm" not in screen and "133" not in screen
+    assert screen.split("\n")[-2].rstrip() == "$"
+
+
 def test_integration_is_idempotent(integrated, tmp_path):
     assert "already active" in integrated.integrate()
     script = tmp_path / "si.sh"
