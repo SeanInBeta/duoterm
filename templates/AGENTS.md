@@ -9,5 +9,8 @@ tools if available); commands run on the remote server.
 - `duoterm run "<cmd>" [--timeout S]` runs one command at the idle prompt and returns output + `[exit N]`.
 - Interactive programs / prompts: `duoterm screen`, `duoterm type "text" --enter`, `duoterm keys C-c Enter Escape ...`.
 - `duoterm wait [--pattern RE] [--idle S]` for long jobs; exit code 124 = still running, 125 = duoterm error.
+- If `duoterm status` shows `shell_integration: False`, each `run` leaves a visible `printf ... __RT_` marker
+  on my screen (it still works). Suggest I run `duoterm integrate` once in that shell, or ask me before
+  running it yourself; `duoterm integrate --print` is the code for my server's ~/.bashrc / ~/.zshrc.
 - If it says the terminal is not idle, look at `duoterm screen` and ask me. Never type secrets.
   Only use `--force` after I confirmed the exact command.

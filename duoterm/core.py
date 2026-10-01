@@ -2,10 +2,16 @@
 
 The terminal is a tmux pane (usually running `ssh host`). A human attaches to it with
 `tmux attach`; agents drive it through this module (via the CLI or the MCP server).
+
+How `run` knows a command finished:
+- shell integration active (see shell_integration.py): only the command is typed; the shell's
+  invisible OSC 133 `D;<exit>` mark, seen in the pipe-pane log, ends it;
+- otherwise: a visible `; printf '\n__RT_%s_%d__\n' <id> $?` suffix, found on screen.
 """
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import re
@@ -15,12 +21,16 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from . import shell_integration as si
 from . import tmux as tm
 
 DEFAULT_SESSION = "remote"
 DEFAULT_PROMPT_RE = r"[$#%]$"
 HISTORY_LIMIT = 50000
 POLL_INTERVAL = 0.2
+LOG_TAIL = 65536  # bytes of log scanned for the latest OSC 133 mark
+MARK_GRACE = 1.0  # seconds the prompt may be back before a missing D mark counts as missing
+OUTPUT_BYTES = 1 << 20  # an integrated command's output is cleaned from at most this many last bytes
 
 # Commands that need --force. Deliberately short: this is a seatbelt against obvious
 # accidents, not a sandbox. Real protection is your agent's permission settings.
@@ -45,6 +55,14 @@ _CSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _ESC_RE = re.compile(r"\x1b(?:[()][0-9A-Za-z]|[@-Z\\-_=>78])")
 _BACKSPACE_RE = re.compile(r"[^\x08\n]\x08")
 _CTRL_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# zsh PROMPT_SP: an (inverse) %/# end-of-line mark, a row of spaces that wraps, then "\r \r".
+_ZSH_PROMPT_SP_RE = re.compile(r"(?:(?:\x1b\[[0-9;]*m)+[^\s\x1b](?:\x1b\[[0-9;]*m)*)? {8,}\r \r")
+
+# OSC 133 shell-integration marks: A prompt start, B prompt end, C command start, D;<exit> done.
+_OSC133_RE = re.compile(rb"\x1b\]133;([A-D])((?:;[^\x07\x1b]*)?)(?:\x07|\x1b\\)")
+_ESC_SEQ_RE = re.compile(rb"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[()].|.)", re.S)
+# An escape sequence cut off by the end of the data (the rest is not in the log yet).
+_PARTIAL_ESC_RE = re.compile(rb"\x1b(?:\][^\x07\x1b]*\x1b?|\[[0-?]*[ -/]*|[()])?\Z")
 
 
 class DuotermError(Exception):
@@ -79,7 +97,8 @@ class Result:
 
 def clean_terminal_text(raw: str) -> str:
     """Turn a raw terminal byte stream (as logged by pipe-pane) into readable text."""
-    text = _OSC_RE.sub("", raw)
+    text = _ZSH_PROMPT_SP_RE.sub("\n", raw)
+    text = _OSC_RE.sub("", text)
     text = _CSI_RE.sub("", text)
     text = _ESC_RE.sub("", text)
     while True:
@@ -108,6 +127,43 @@ def prettify(text: str) -> str:
     return _MARKER_LINE_RE.sub(lambda m: f"\n[exit {m.group(1)}]", text)
 
 
+_EXIT_LINE_RE = re.compile(r"\n*(\[exit \d+\])\n+")
+# The echo of the line `integrate` types (it erases it from the screen; hide it in log reads too).
+_INTEGRATE_ECHO_RE = re.compile(r"^.*\\033\[F\\033\[2K%\.0s' \{1\.\.\d+\}.*\n?", re.M)
+
+
+def _mark_exit(m: re.Match) -> int | None:
+    code = m.group(2).lstrip(b";").split(b";")[0]
+    return int(code) if code.isdigit() else None
+
+
+def render_marks(raw: bytes) -> bytes:
+    """Replace OSC 133 marks: a command's D mark becomes an `[exit N]` line, the rest vanish."""
+    out, pos, in_command = [], 0, False
+    for m in _OSC133_RE.finditer(raw):
+        out.append(raw[pos : m.start()])
+        kind = m.group(1)
+        if kind == b"C":
+            in_command = True
+        elif kind == b"D":
+            code = _mark_exit(m)
+            if in_command and code is not None:
+                out.append(b"\n[exit %d]\n" % code)
+            in_command = False
+        pos = m.end()
+    out.append(raw[pos:])
+    return b"".join(out)
+
+
+def complete_prefix(raw: bytes) -> int:
+    """Length of `raw` without a trailing half-written escape sequence or UTF-8 character."""
+    m = _PARTIAL_ESC_RE.search(raw, max(0, len(raw) - 4096))
+    end = m.start() if m else len(raw)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    decoder.decode(raw[:end], final=False)
+    return end - len(decoder.getstate()[0])
+
+
 def check_dangerous(command: str) -> str | None:
     for pattern, why in DANGEROUS_PATTERNS:
         if re.search(pattern, command):
@@ -131,15 +187,61 @@ def _strip_blank_edges(lines: list[str]) -> list[str]:
     return lines
 
 
-def _wrap_command(command: str, marker_id: str) -> str:
+def _marker_command(marker_id: str) -> str:
     # The marker is printed with printf placeholders, so the echoed command line shows
     # "__RT_%s_%d__" while the output shows "__RT_<id>_<code>__": no false match.
-    marker = f"printf '\\n__RT_%s_%d__\\n' {marker_id} $?"
+    return f"printf '\\n__RT_%s_%d__\\n' {marker_id} $?"
+
+
+def _wrap_command(command: str, marker_id: str | None = None) -> str:
+    """The text to type: the command, plus the visible marker unless shell integration is on."""
     body = command.strip().rstrip(";").rstrip()
     if "\n" in body or "#" in body or body.endswith("&"):
-        # A group survives comments, trailing '&' and multi-line scripts.
-        return "{ " + body + "\n}; " + marker
-    return f"{body}; {marker}"
+        # A group survives comments, trailing '&' and multi-line scripts (one command, one D mark).
+        body = "{ " + body + "\n}"
+    return f"{body}; {_marker_command(marker_id)}" if marker_id else body
+
+
+def _integrate_line(cursor_x: int, width: int) -> str:
+    """The setup code as one line, prefixed with a space (skips history where HISTCONTROL allows),
+    ending in a printf that moves up over the echoed line(s) and erases them one by one
+    (erasing to the end of the screen from the top-left corner would push them into tmux history)."""
+    code, rows = " " + si.one_line(), 1
+    for _ in range(5):
+        line = f"{code}; printf '\\033[F\\033[2K%.0s' {{1..{rows}}}"
+        # Rows taken by prompt + echo, plus the one Enter moves to; readline/zle wrap a full row too.
+        needed = (cursor_x + len(line)) // max(width, 1) + 1
+        if needed == rows:
+            break
+        rows = needed
+    return line
+
+
+def _parse_osc_run(raw: bytes, echo_lines: int) -> tuple[str, int | None]:
+    """Output of an integrated command from its log bytes, and its exit code once D arrived.
+
+    Output starts after the C mark (printed when the shell starts the command) or, if the
+    shell sends none, after the echoed command lines; it ends at the first D mark.
+    """
+    marks = list(_OSC133_RE.finditer(raw))
+    c = next((m for m in marks if m.group(1) == b"C"), None)
+    if c:
+        start = c.end()
+    else:
+        start = 0
+        for _ in range(echo_lines):
+            nl = raw.find(b"\n", start)
+            if nl == -1:
+                return "", None
+            start = nl + 1
+    d = next((m for m in marks if m.group(1) == b"D" and m.start() >= start), None)
+    body = raw[start : d.start()] if d else raw[start : complete_prefix(raw)]
+    if len(body) > OUTPUT_BYTES:  # only the tail is returned anyway; restart at a line boundary
+        body = body[-OUTPUT_BYTES:]
+        body = body[body.find(b"\n") + 1 :]
+    text = clean_terminal_text(body.decode("utf-8", "replace"))
+    output = "\n".join(_strip_blank_edges(text.split("\n")))
+    return output, (_mark_exit(d) if d else None)
 
 
 class Terminal:
@@ -256,7 +358,7 @@ class Terminal:
         self.ensure()
         cursors = self._load_state().get("cursors", {})
         offset = cursors.get(cursor, 0)
-        if offset > self.log_path.stat().st_size:  # log truncated/rotated
+        if offset > self._log_size():  # log truncated/rotated
             offset = 0
         text, end = self._log_since(offset)
         if advance:
@@ -265,18 +367,63 @@ class Terminal:
         return tail_lines(text, max_lines)
 
     def _log_since(self, offset: int) -> tuple[str, int]:
-        with open(self.log_path, "rb") as fh:
-            fh.seek(offset)
-            raw = fh.read()
-        text = prettify(clean_terminal_text(raw.decode("utf-8", "replace")))
+        """Readable log text from `offset` on, and the offset to continue from next time."""
+        offset = self._align(offset)
+        raw = self._read_log(offset)
+        raw = raw[: complete_prefix(raw)]  # a half-written sequence waits for the next read
+        text = clean_terminal_text(render_marks(raw).decode("utf-8", "replace"))
+        text = prettify(_EXIT_LINE_RE.sub(r"\n\1\n", _INTEGRATE_ECHO_RE.sub("", text)))
         return "\n".join(_strip_blank_edges(text.split("\n"))), offset + len(raw)
+
+    def _log_size(self) -> int:
+        return self.log_path.stat().st_size
+
+    def _read_log(self, start: int, end: int | None = None) -> bytes:
+        with open(self.log_path, "rb") as fh:
+            fh.seek(start)
+            return fh.read() if end is None else fh.read(max(end - start, 0))
+
+    def _align(self, offset: int) -> int:
+        """Move an offset that falls inside an escape sequence or a UTF-8 character past it."""
+        if offset <= 0:
+            return 0
+        before = self._read_log(max(0, offset - 4096), offset)
+        rest = self._read_log(offset, offset + 4096)
+        partial = _PARTIAL_ESC_RE.search(before)
+        if partial:
+            m = _ESC_SEQ_RE.match(before[partial.start() :] + rest)
+            if m:
+                return offset + max(m.end() - (len(before) - partial.start()), 0)
+        skip = 0
+        while skip < len(rest) and 0x80 <= rest[skip] <= 0xBF:  # UTF-8 continuation bytes
+            skip += 1
+        return offset + skip
+
+    def _integration(self) -> tuple[bool, int, int]:
+        """(active, position of the latest OSC 133 mark, log size).
+
+        Active when the latest mark is a prompt mark (A/B): the shell sitting at this prompt
+        is integrated. After C (a command started: ssh, sudo -i, a subshell, vim...) whatever
+        prompt shows up next belongs to something else until that shell prints A again.
+        """
+        size = self._log_size()
+        start = max(0, size - LOG_TAIL)
+        last = None
+        for last in _OSC133_RE.finditer(self._read_log(start, size)):
+            pass
+        if last is None or last.group(1) not in (b"A", b"B"):
+            return False, -1, size
+        at = start + last.start()
+        if at <= self._load_state().get("integration_lost_at", -1):
+            return False, at, size
+        return True, at, size
 
     def is_idle(self) -> tuple[bool, str]:
         """True when the cursor sits on an empty shell prompt (nothing half-typed)."""
-        info = tm.pane_info(self.session)
-        rows = tm.capture(self.session).split("\n")
-        cy = int(info["cursor_y"])
-        line = rows[cy].rstrip() if cy < len(rows) else ""
+        cy = int(tm.pane_info(self.session)["cursor_y"])
+        # Capture just the cursor row: in a full capture, wrapped rows are joined (-J), so long
+        # lines further up would shift the row index.
+        line = tm.capture(self.session, start=cy, end=cy).split("\n")[0].rstrip()
         return bool(self.prompt_re.search(line)), line
 
     def status(self) -> dict:
@@ -293,6 +440,7 @@ class Terminal:
             "current_line": line,
             "local_foreground_command": info["pane_current_command"],
             "pending_agent_command": pending["command"] if pending else None,
+            "shell_integration": self._integration()[0],
             "log": str(self.log_path),
             "attach": self.attach_command(),
         }
@@ -317,45 +465,80 @@ class Terminal:
             why = check_dangerous(command)
             if why:
                 raise DuotermError(f"refused: looks dangerous ({why}). Confirm with the user, then re-run with --force")
-            idle, line = self.is_idle()
-            if self._load_state().get("pending"):
-                if not idle:
-                    raise DuotermError("a previous agent command is still running; use `duoterm wait` (or `duoterm keys C-c`)")
-                # Back at a prompt without anyone collecting the marker (e.g. interrupted): forget it.
-                self._update_state(pending=None)
-                self._restore_status()
-            if not idle:
-                raise DuotermError(
-                    f"terminal is not at an idle shell prompt (current line: {line!r}). "
-                    "Something is running, the user is typing, or an interactive program is open. "
-                    "Inspect with `duoterm screen`; use `duoterm type/keys` for interactive programs, "
-                    "or --force if the prompt is just unusual (or set DUOTERM_PROMPT_RE)"
-                )
+            self._require_idle_prompt()
 
-        marker_id = secrets.token_hex(4)
+        integrated, mark_at, log_size = self._integration()
         info = tm.pane_info(self.session)
         start_abs = int(info["history_size"]) + int(info["cursor_y"])
         prompt = self.is_idle()[1]
         self._set_busy_status(command)
-        pending = {"id": marker_id, "start_abs": start_abs, "prompt": prompt, "command": command, "started": time.time()}
+        pending = {"start_abs": start_abs, "prompt": prompt, "command": command, "started": time.time()}
+        if integrated:
+            text = _wrap_command(command)
+            # Everything the shell prints for this command lands in the log after log_size.
+            pending.update(mode="osc", offset=log_size, mark_at=mark_at, lines=text.count("\n") + 1)
+        else:
+            pending["id"] = secrets.token_hex(4)
+            text = _wrap_command(command, pending["id"])
         self._update_state(pending=pending)
-        tm.send_literal(self.session, _wrap_command(command, marker_id))
+        tm.send_literal(self.session, text)
         tm.send_keys(self.session, "Enter")
-        return self._wait_marker(pending, timeout, max_lines)
+        return self._wait_pending(pending, timeout, max_lines)
+
+    def _require_idle_prompt(self) -> None:
+        idle, line = self.is_idle()
+        deadline = time.time() + 0.5
+        while not idle and not line.strip() and time.time() < deadline:
+            # A command that just finished: its prompt may be a moment from being drawn.
+            time.sleep(0.05)
+            idle, line = self.is_idle()
+        if self._load_state().get("pending"):
+            if not idle:
+                raise DuotermError("a previous agent command is still running; use `duoterm wait` (or `duoterm keys C-c`)")
+            # Back at a prompt without anyone collecting the marker (e.g. interrupted): forget it.
+            self._update_state(pending=None)
+            self._restore_status()
+        if not idle:
+            raise DuotermError(
+                f"terminal is not at an idle shell prompt (current line: {line!r}). "
+                "Something is running, the user is typing, or an interactive program is open. "
+                "Inspect with `duoterm screen`; use `duoterm type/keys` for interactive programs, "
+                "or --force if the prompt is just unusual (or set DUOTERM_PROMPT_RE)"
+            )
+
+    def integrate(self, force: bool = False, timeout: float = 5.0) -> str:
+        """Type the shell-integration setup into the shared shell (once per shell, e.g. after ssh)."""
+        self.ensure()
+        if self._integration()[0]:
+            return "shell integration already active: commands run without a visible marker"
+        if not force:
+            self._require_idle_prompt()
+        info = tm.pane_info(self.session)
+        tm.send_literal(self.session, _integrate_line(int(info["cursor_x"]), int(info["pane_width"])))
+        tm.send_keys(self.session, "Enter")
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._integration()[0] and self.is_idle()[0]:
+                return "shell integration active: commands now run without a visible marker"
+            time.sleep(POLL_INTERVAL)
+        return (
+            "setup code sent, but no OSC 133 prompt mark appeared (needs bash >= 4.4 or zsh); "
+            "duoterm keeps using its visible printf marker in this shell"
+        )
 
     def wait(self, timeout: float = 60.0, idle: float = 2.0, pattern: str | None = None, max_lines: int = 200) -> Result:
         """Wait for the pending agent command, a regex in new output, or the terminal going quiet."""
         self.ensure()
         pending = self._load_state().get("pending")
         if pending and not pattern:
-            return self._wait_marker(pending, timeout, max_lines)
+            return self._wait_pending(pending, timeout, max_lines)
 
         regex = re.compile(pattern) if pattern else None
-        start_offset = self.log_path.stat().st_size
+        start_offset = self._log_size()
         last_size, last_change = start_offset, time.time()
         deadline = time.time() + timeout
         while True:
-            size = self.log_path.stat().st_size
+            size = self._log_size()
             now = time.time()
             if size != last_size:
                 last_size, last_change = size, now
@@ -373,6 +556,67 @@ class Terminal:
         # Output produced during the wait; if there was none, the bottom of the screen.
         text = self._log_since(offset)[0]
         return tail_lines(text, max_lines) if text.strip() else self.read(20)
+
+    def _wait_pending(self, pending: dict, timeout: float, max_lines: int) -> Result:
+        if pending.get("mode") == "osc":
+            return self._wait_osc(pending, timeout, max_lines)
+        return self._wait_marker(pending, timeout, max_lines)
+
+    def _wait_osc(self, pending: dict, timeout: float, max_lines: int) -> Result:
+        """Wait for the shell's OSC 133 D mark after the command (shell integration mode)."""
+        deadline = time.time() + timeout
+        prompt_back_at = None
+        raw = b""
+        while True:
+            new = self._read_log(pending["offset"] + len(raw))
+            raw += new
+            if b"\x1b]133;D" in raw[-(len(new) + 16) :]:  # parse only when a D mark may have arrived
+                output, exit_code = _parse_osc_run(raw, pending["lines"])
+                if exit_code is not None:
+                    self._update_state(pending=None)
+                    self._restore_status()
+                    return Result("done", tail_lines(output, max_lines), exit_code=exit_code)
+            now = time.time()
+            if self._back_at_original_prompt(pending):
+                # D is printed before the prompt, so it should be logged by now (allow for lag).
+                prompt_back_at = prompt_back_at or now
+                if now - prompt_back_at >= MARK_GRACE:
+                    return self._exit_code_without_marks(pending, max_lines)
+            else:
+                prompt_back_at = None
+            if now >= deadline:
+                self._set_busy_status(pending["command"], still=True)
+                return Result(
+                    "running",
+                    tail_lines(_parse_osc_run(raw, pending["lines"])[0], max_lines),
+                    message=f"still running after {timeout:g}s; `duoterm wait` to keep waiting, `duoterm keys C-c` to interrupt",
+                )
+            time.sleep(POLL_INTERVAL)
+
+    def _exit_code_without_marks(self, pending: dict, max_lines: int) -> Result:
+        """The prompt came back but no D mark: the shell here is not integrated after all (e.g. ssh
+        dropped back to a local shell). Stop trusting its marks and ask for $? with the printf marker."""
+        self._update_state(integration_lost_at=pending["mark_at"])
+        rows = self._capture_from(pending["start_abs"])
+        prompt_row = max((i for i, row in enumerate(rows) if row.rstrip() == pending["prompt"]), default=len(rows))
+        output = "\n".join(_strip_blank_edges(rows[pending["lines"] : prompt_row]))
+        info = tm.pane_info(self.session)
+        probe = {
+            "id": secrets.token_hex(4),
+            "start_abs": int(info["history_size"]) + int(info["cursor_y"]),
+            "prompt": pending["prompt"],
+            "command": pending["command"],
+            "started": pending["started"],
+        }
+        self._update_state(pending=probe)
+        tm.send_literal(self.session, _marker_command(probe["id"]))
+        tm.send_keys(self.session, "Enter")
+        result = self._wait_marker(probe, 10.0, max_lines)
+        if result.status != "done":
+            return result
+        result.output = tail_lines(output, max_lines)
+        result.message = "no shell integration here after all; exit status read with the visible marker"
+        return result
 
     def _wait_marker(self, pending: dict, timeout: float, max_lines: int) -> Result:
         marker_re = re.compile(rf"__RT_{pending['id']}_(\d+)__")

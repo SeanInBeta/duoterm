@@ -23,7 +23,7 @@ def test_mcp_tools_over_stdio(term):
                 names = {t.name for t in (await session.list_tools()).tools}
                 assert names == {
                     "terminal_status", "terminal_run", "terminal_type", "terminal_keys",
-                    "terminal_screen", "terminal_read", "terminal_wait",
+                    "terminal_screen", "terminal_read", "terminal_wait", "terminal_integrate",
                 }
                 res = await session.call_tool("terminal_run", {"command": "echo via-mcp; false"})
                 assert not res.isError
@@ -32,5 +32,14 @@ def test_mcp_tools_over_stdio(term):
                 assert res.isError and "dangerous" in res.content[0].text
                 res = await session.call_tool("terminal_read", {"new_only": True})
                 assert "via-mcp" in res.content[0].text
+                res = await session.call_tool("terminal_integrate", {})
+                assert "integration active" in res.content[0].text
+                res = await session.call_tool("terminal_status", {})
+                assert "shell_integration: True" in res.content[0].text
+                res = await session.call_tool("terminal_run", {"command": "echo invisible; false"})
+                assert res.content[0].text == "invisible\n[exit 1]"
+                res = await session.call_tool("terminal_screen", {})
+                after = res.content[0].text.split("echo invisible; false")[-1]  # earlier runs were not integrated
+                assert after.startswith("\ninvisible\n") and "__RT_" not in after
 
     anyio.run(scenario)

@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
+from . import shell_integration as si
 from . import tmux as tm
 from .core import DuotermError, Terminal
 
@@ -25,6 +26,10 @@ The user watches it live and may type into it too.
   terminal_screen + terminal_type/terminal_keys instead of terminal_run.
 - Never type passwords or secrets; ask the user to type them in the terminal.
 - If terminal_run says the terminal is busy, look at terminal_screen before doing anything else.
+- If terminal_status shows shell_integration: False, terminal_run leaves a visible printf/__RT_ marker
+  after each command. Suggest the user runs `duoterm integrate` once in that shell (or, with their
+  approval, call terminal_integrate); to make it permanent, terminal_integrate(print_only=True) gives
+  the code for their ~/.bashrc / ~/.zshrc on the server.
 """
 
 mcp = FastMCP("duoterm", instructions=INSTRUCTIONS)
@@ -98,6 +103,17 @@ async def terminal_read(lines: int = 100, new_only: bool = False, session: str |
     else:
         text = await _in_thread(term.read, lines)
     return text or "[nothing new]"
+
+
+@mcp.tool(annotations=WRITES)
+async def terminal_integrate(print_only: bool = False, force: bool = False, session: str | None = None) -> str:
+    """Set up shell integration (invisible OSC 133 marks, bash >= 4.4 / zsh) in the shared shell, so
+    terminal_run no longer shows a printf marker on the user's screen. Types one setup line at the
+    idle prompt and erases it again. print_only=True only returns the code for ~/.bashrc / ~/.zshrc.
+    """
+    if print_only:
+        return si.script()
+    return await _in_thread(Terminal(session).integrate, force=force)
 
 
 @mcp.tool(annotations=READ_ONLY)
