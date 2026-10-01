@@ -26,10 +26,9 @@ The user watches it live and may type into it too.
   terminal_screen + terminal_type/terminal_keys instead of terminal_run.
 - Never type passwords or secrets; ask the user to type them in the terminal.
 - If terminal_run says the terminal is busy, look at terminal_screen before doing anything else.
-- If terminal_status shows shell_integration: False, terminal_run leaves a visible printf/__RT_ marker
-  after each command. Suggest the user runs `duoterm integrate` once in that shell (or, with their
-  approval, call terminal_integrate); to make it permanent, terminal_integrate(print_only=True) gives
-  the code for their ~/.bashrc / ~/.zshrc on the server.
+- terminal_run sets up shell integration by itself the first time (one setup line, erased again),
+  so commands show on the user's screen without a printf/__RT_ marker. You do not need to call
+  terminal_integrate; if a shell cannot be integrated (sh, fish), terminal_run still works the same.
 """
 
 mcp = FastMCP("duoterm", instructions=INSTRUCTIONS)

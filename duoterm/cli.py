@@ -21,9 +21,10 @@ typical agent loop:
   duoterm type "y" --enter       answer an interactive prompt
   duoterm keys C-c               interrupt
 
-once per login (bash or zsh on the server):
-  duoterm integrate              invisible OSC 133 marks: `run` no longer leaves a printf marker on screen
-  duoterm integrate --print      the same setup code, to append to ~/.bashrc or ~/.zshrc
+shell integration (bash or zsh on the server; invisible OSC 133 marks instead of a printf marker):
+  `run` sets it up by itself the first time (DUOTERM_AUTO_INTEGRATE=0 turns that off)
+  duoterm integrate              set it up now, without running anything
+  duoterm integrate --print      the setup code, to append to ~/.bashrc or ~/.zshrc
 
 exit codes: command's own exit code for `run`; 124 still running; 125 duoterm error.
 """

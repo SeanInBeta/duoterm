@@ -227,6 +227,10 @@ def _integrate_line(rows: int) -> str:
     return f" {si.one_line()}; printf '\\033[F\\033[2K%.0s' {{1..{rows}}}"
 
 
+def _auto_integrate_enabled() -> bool:
+    return os.environ.get("DUOTERM_AUTO_INTEGRATE", "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def _parse_osc_run(raw: bytes, echo_lines: int) -> tuple[str, int | None]:
     """Output of an integrated command from its log bytes, and its exit code once D arrived.
 
@@ -483,6 +487,8 @@ class Terminal:
             self._require_idle_prompt()
 
         integrated, mark_at, log_size = self._integration()
+        if not integrated and not force and _auto_integrate_enabled():
+            integrated, mark_at, log_size = self._auto_integrate()
         info = tm.pane_info(self.session)
         start_abs = int(info["history_size"]) + int(info["cursor_y"])
         prompt = self.is_idle()[1]
@@ -528,6 +534,26 @@ class Terminal:
             return "shell integration already active: commands run without a visible marker"
         if not force:
             self._require_idle_prompt()
+        if self._send_integration(timeout):
+            return "shell integration active: commands now run without a visible marker"
+        return (
+            "setup code sent, but no OSC 133 prompt mark appeared (needs bash or zsh); "
+            "duoterm keeps using its visible printf marker in this shell"
+        )
+
+    def _auto_integrate(self) -> tuple[bool, int, int]:
+        """`run` in a shell without integration: set it up first, unless DUOTERM_AUTO_INTEGRATE=0
+        or it already failed at this same prompt (a shell that cannot do it, e.g. sh or fish)."""
+        prompt = self.is_idle()[1]
+        if self._load_state().get("auto_integrate_failed") != prompt:
+            ok = self._send_integration(timeout=3.0)
+            self._update_state(auto_integrate_failed=None if ok else prompt)
+            if not ok:
+                self._wait_for_prompt(2.0)
+        return self._integration()
+
+    def _send_integration(self, timeout: float) -> bool:
+        """Type the setup line at the prompt, erase it again, and wait for the first prompt mark."""
         info = tm.pane_info(self.session)
         top = int(info["history_size"]) + int(info["cursor_y"])
         # Guess the rows the typed line takes if it wraps; then measure, since readline may also
@@ -545,12 +571,9 @@ class Terminal:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self._integration()[0] and self.is_idle()[0]:
-                return "shell integration active: commands now run without a visible marker"
+                return True
             time.sleep(POLL_INTERVAL)
-        return (
-            "setup code sent, but no OSC 133 prompt mark appeared (needs bash or zsh); "
-            "duoterm keeps using its visible printf marker in this shell"
-        )
+        return False
 
     def _settled_row(self, timeout: float = 2.0) -> int:
         """Absolute cursor row once the shell has stopped redrawing the input line."""

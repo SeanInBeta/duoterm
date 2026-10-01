@@ -21,6 +21,8 @@ def _terminal(tmp_path, monkeypatch, command):
     monkeypatch.setenv("DUOTERM_TMUX_SOCKET", socket)
     monkeypatch.delenv("DUOTERM_SESSION", raising=False)
     monkeypatch.delenv("DUOTERM_PROMPT_RE", raising=False)
+    # Tests opt in to automatic shell integration explicitly; by default they cover the printf marker.
+    monkeypatch.setenv("DUOTERM_AUTO_INTEGRATE", "0")
     t = Terminal(session="t", home=tmp_path / "home")
     t.start(command=command)
     t._wait_for_prompt(5)
