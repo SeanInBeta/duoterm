@@ -21,7 +21,7 @@ typical agent loop:
   duoterm type "y" --enter       answer an interactive prompt
   duoterm keys C-c               interrupt
 
-once per login (needs bash >= 4.4 or zsh on the server):
+once per login (bash or zsh on the server):
   duoterm integrate              invisible OSC 133 marks: `run` no longer leaves a printf marker on screen
   duoterm integrate --print      the same setup code, to append to ~/.bashrc or ~/.zshrc
 

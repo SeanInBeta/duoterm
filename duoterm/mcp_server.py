@@ -107,7 +107,7 @@ async def terminal_read(lines: int = 100, new_only: bool = False, session: str |
 
 @mcp.tool(annotations=WRITES)
 async def terminal_integrate(print_only: bool = False, force: bool = False, session: str | None = None) -> str:
-    """Set up shell integration (invisible OSC 133 marks, bash >= 4.4 / zsh) in the shared shell, so
+    """Set up shell integration (invisible OSC 133 marks, bash / zsh) in the shared shell, so
     terminal_run no longer shows a printf marker on the user's screen. Types one setup line at the
     idle prompt and erases it again. print_only=True only returns the code for ~/.bashrc / ~/.zshrc.
     """
