@@ -192,3 +192,23 @@ def test_idle_check_survives_wrapped_lines(term):
     assert term.run(f"echo {long_word}").output == long_word
     assert term.is_idle() == (True, "$")
     assert term.run("echo after-wrap").output == "after-wrap"
+
+
+def test_shared_pane_uses_a_widely_known_term(term):
+    # tmux-256color is missing on older servers (CentOS 7), where readline then hides the prompt.
+    assert term.run("echo $TERM").output == "screen-256color"
+
+
+@pytest.mark.parametrize("value", ["xterm-256color", ""])
+def test_term_can_be_overridden(tmp_path, monkeypatch, value):
+    from duoterm import tmux as tm
+
+    from .conftest import SHELL, _terminal
+
+    monkeypatch.setenv("DUOTERM_TERM", value)
+    t, socket = _terminal(tmp_path, monkeypatch, SHELL)
+    try:
+        expected = value or tm.tmux("show-options", "-sv", "default-terminal").strip()  # "" keeps tmux's default
+        assert t.run("echo $TERM").output == expected
+    finally:
+        subprocess.run(["tmux", "-L", socket, "kill-server"], capture_output=True)

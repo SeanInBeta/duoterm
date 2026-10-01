@@ -97,6 +97,7 @@ Windows Terminal 小技巧：把 `templates/windows-terminal-profile.json` 加�
 ## 工作原理（以及解决了哪些坑）
 
 - **共享**：tmux 会话跑在本地 WSL 里，pane 里是 `ssh myserver`。你 `tmux attach` 进去打字；Agent 用 `tmux send-keys` 输入、`tmux capture-pane` 读屏。远程服务器上**不需要装任何东西**（shell integration 是可选的，也只是一段 shell 代码）。
+- **终端类型**：duoterm 新建的共享窗口里 `TERM=screen-256color`，ssh 会把它带到服务器上。tmux 自己默认的 `tmux-256color` 在老服务器（例如 CentOS 7）的终端库里没有，那里的 bash 会退回“哑终端”模式：输入行横向滚动，提示符被藏到 `<` 后面，长命令和输出挤在一起。tmux 兼容 screen 的控制指令，`screen-256color` 各个系统都有。只影响 duoterm 建的这个窗口，不改你其他 tmux 会话；想换成别的值设 `DUOTERM_TERM`，设成空（`DUOTERM_TERM=`）则用 tmux 自己的 `default-terminal`。已经在跑的会话要 `duoterm stop` 后重新 `duoterm start` 才生效。
 - **知道命令何时结束、退出码多少**，有两种方式，`run` 每次自动选：
   - **shell integration（推荐）**：和 VS Code / iTerm2 / FinalTerm 一样，让远程 shell 在每次显示提示符前输出 OSC 133 转义序列：`ESC]133;D;<上一条命令退出码>BEL`、`ESC]133;A BEL`，命令开始执行时输出 `ESC]133;C BEL`（bash 用 `PROMPT_COMMAND` + `PS0`，zsh 用 `precmd` / `preexec`）。bash < 4.4（例如 CentOS 7 的 4.2）没有 `PS0`，改为在 `PS1` 末尾加一个不可见的“提示符结束”标记 `ESC]133;B BEL`，命令输出从回显的命令行之后算起。终端不会显示这些序列，但 `tmux pipe-pane` 写的原始日志里有。`run` 记下日志当前的字节偏移，**只发送命令本身**，然后在日志里等这之后的第一个 `133;D`：退出码取自它，输出取 `C` 和 `D` 之间（清理掉所有 OSC 序列）。屏幕上就只有 `ls` 和它的输出。
   - **printf 标记（回退）**：没有检测到 integration 时，`run` 发送 `cmd; printf '\n__RT_%s_%d__\n' <随机id> $?`，轮询屏幕直到出现 `__RT_<id>_<退出码>__`。屏幕回显里是 `%s/%d` 模板，不会误匹配。读给 Agent 的内容会把这些标记折叠成 `[exit N]`。
