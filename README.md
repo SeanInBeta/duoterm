@@ -49,6 +49,8 @@ duoterm attach
 
 然后在另一个终端（也在 WSL 里）启动你的 Agent，并按下一节把它接上。
 
+> 之前装过、`duoterm-mcp` 启动报 `No module named 'mcp.server.fastmcp'`（Agent 里显示 `duoterm: failed (0 tools)`）？这是装上了不兼容的 mcp 2.x，运行 `~/.local/share/duoterm/venv/bin/pip install "mcp<2"` 或重新运行 `./install.sh` 即可修复。
+
 Windows Terminal 小技巧：把 `templates/windows-terminal-profile.json` 加到 profile 里，一点就能打开“共享 SSH”标签；`Alt+Shift+D` 分屏，一边 Agent 一边 SSH。
 
 ## 接入各个 Agent
