@@ -27,6 +27,12 @@ from . import tmux as tm
 DEFAULT_SESSION = "remote"
 DEFAULT_PROMPT_RE = r"[$#%]$"
 HISTORY_LIMIT = 50000
+# TERM for the shared pane (and so, through ssh, for the remote shell). tmux's own default,
+# tmux-256color, is missing from older servers' terminfo (e.g. CentOS 7); there bash's readline
+# falls back to a dumb terminal and scrolls long lines sideways, hiding the prompt behind "<".
+# tmux is screen-compatible, and screen-256color exists everywhere. DUOTERM_TERM overrides it;
+# DUOTERM_TERM= (empty) keeps tmux's default-terminal.
+DEFAULT_TERM = "screen-256color"
 POLL_INTERVAL = 0.2
 LOG_TAIL = 65536  # bytes of log scanned for the latest OSC 133 mark
 MARK_GRACE = 1.0  # seconds the prompt may be back before a missing D mark counts as missing
@@ -325,7 +331,7 @@ class Terminal:
     ) -> str:
         created = False
         if not self.exists():
-            tm.new_session(self.session, command, HISTORY_LIMIT)
+            tm.new_session(self.session, command, HISTORY_LIMIT, term=os.environ.get("DUOTERM_TERM", DEFAULT_TERM))
             created = True
         self._ensure_logging()
         lines = [f"session '{self.session}' {'created' if created else 'already running'}; log: {self.log_path}"]

@@ -37,12 +37,17 @@ def has_session(session: str) -> bool:
     return proc.returncode == 0
 
 
-def new_session(session: str, command: str | None, history_limit: int, width: int = 200, height: int = 50) -> None:
+def new_session(
+    session: str, command: str | None, history_limit: int, width: int = 200, height: int = 50, term: str | None = None
+) -> None:
     # history-limit only applies to panes created after it is set, so boot the session
     # with a throwaway window, set the option, open the real window, drop the boot one.
     tmux("new-session", "-d", "-s", session, "-n", "_boot", "-x", str(width), "-y", str(height), "sleep 60")
     tmux("set-option", "-t", session, "history-limit", str(history_limit))
     args = ["new-window", "-t", f"={session}:", "-n", "shell"]
+    if term:
+        # Only this window: default-terminal is a server option and would change the user's other sessions.
+        args += ["-e", f"TERM={term}"]
     if command:
         args.append(command)
     tmux(*args)
