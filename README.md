@@ -45,6 +45,9 @@ duoterm start myserver
 
 # 4. 在“SSH 那个终端”里接入这个会话，之后你就在这里手动操作
 duoterm attach
+
+# 5.（推荐）每次 ssh 登录后执行一次：装上不可见的 shell integration，Agent 跑命令时屏幕上就只有命令和输出
+duoterm integrate       # 想永久生效：duoterm integrate --print >> 服务器上的 ~/.bashrc 或 ~/.zshrc（见下文）
 ```
 
 然后在另一个终端（也在 WSL 里）启动你的 Agent，并按下一节把它接上。
@@ -77,7 +80,9 @@ Windows Terminal 小技巧：把 `templates/windows-terminal-profile.json` 加�
 |---|---|
 | `duoterm start [host] [--ssh-arg ARG] [--reconnect]` | 创建 tmux 会话、开启日志并执行 `ssh host`；会话已存在时不会重复 ssh（断线后用 `--reconnect`） |
 | `duoterm attach` | 你自己接入共享会话 |
-| `duoterm status` | 会话是否存在、是否停在空闲提示符、Agent 是否有命令在跑 |
+| `duoterm status` | 会话是否存在、是否停在空闲提示符、Agent 是否有命令在跑、是否检测到 shell integration |
+| `duoterm integrate [--force]` | 在当前空闲提示符下装上 shell integration（bash ≥ 4.4 / zsh），之后 `run` 不再留下可见标记 |
+| `duoterm integrate --print` | 只打印这段设置代码，贴进服务器的 `~/.bashrc` / `~/.zshrc` 永久生效 |
 | `duoterm run "cmd" [-t 秒] [--force]` | 在空闲提示符执行一条命令，返回输出和 `[exit N]` |
 | `duoterm read [-n N]` / `duoterm read --new` | 最近 N 行 / 上次读取以来的新增内容（包括你手打的） |
 | `duoterm screen` | 当前屏幕原样（vim、top、交互提示） |
@@ -92,10 +97,15 @@ Windows Terminal 小技巧：把 `templates/windows-terminal-profile.json` 加�
 
 ## 工作原理（以及解决了哪些坑）
 
-- **共享**：tmux 会话跑在本地 WSL 里，pane 里是 `ssh myserver`。你 `tmux attach` 进去打字；Agent 用 `tmux send-keys` 输入、`tmux capture-pane` 读屏。远程服务器上**不需要装任何东西**。
-- **知道命令何时结束、退出码多少**：`duoterm run` 实际发送的是 `cmd; printf '\n__RT_%s_%d__\n' <随机id> $?`，然后轮询屏幕直到出现 `__RT_<id>_<退出码>__`。屏幕回显里是 `%s/%d` 模板，不会误匹配。读给 Agent 的内容会把这些标记折叠成 `[exit N]`。含注释、多行、结尾 `&` 的命令会自动包成 `{ …\n}` 再加标记。
+- **共享**：tmux 会话跑在本地 WSL 里，pane 里是 `ssh myserver`。你 `tmux attach` 进去打字；Agent 用 `tmux send-keys` 输入、`tmux capture-pane` 读屏。远程服务器上**不需要装任何东西**（shell integration 是可选的，也只是一段 shell 代码）。
+- **知道命令何时结束、退出码多少**，有两种方式，`run` 每次自动选：
+  - **shell integration（推荐）**：和 VS Code / iTerm2 / FinalTerm 一样，让远程 shell 在每次显示提示符前输出 OSC 133 转义序列：`ESC]133;D;<上一条命令退出码>BEL`、`ESC]133;A BEL`，命令开始执行时输出 `ESC]133;C BEL`（bash 用 `PROMPT_COMMAND` + `PS0`，zsh 用 `precmd` / `preexec`）。终端不会显示这些序列，但 `tmux pipe-pane` 写的原始日志里有。`run` 记下日志当前的字节偏移，**只发送命令本身**，然后在日志里等这之后的第一个 `133;D`：退出码取自它，输出取 `C` 和 `D` 之间（清理掉所有 OSC 序列）。屏幕上就只有 `ls` 和它的输出。
+  - **printf 标记（回退）**：没有检测到 integration 时，`run` 发送 `cmd; printf '\n__RT_%s_%d__\n' <随机id> $?`，轮询屏幕直到出现 `__RT_<id>_<退出码>__`。屏幕回显里是 `%s/%d` 模板，不会误匹配。读给 Agent 的内容会把这些标记折叠成 `[exit N]`。
+  - **怎么判断用哪种**：只有日志里最近一个 OSC 133 标记是“提示符开始”（A）时才走 integration。你 ssh 到另一台机器、`sudo -i`、进了子 shell、开了 vim 时，最近的标记是“命令开始”（C），自动回退到 printf 标记；回到装了 integration 的 shell 后又自动切回来。万一判断错了（比如 ssh 断线掉回本地 shell），提示符回来却没等到 `D`，`run` 会补发一次 printf 标记取回 `$?`，并在这个 shell 里改用回退方式。
+  - 两种方式下，含注释、多行、结尾 `&` 的命令都会包成 `{ …\n}` 再发送（多行命令因此只算一条命令、一个 `D`）。
+- **shell integration 的安装**：`duoterm integrate` 在空闲提示符下发送一行设置代码（开头带空格，`HISTCONTROL` 含 `ignorespace`/`ignoreboth` 时不进 history），执行完自己把这一行从屏幕上擦掉；`read --new` / `context` 里也会隐藏它。代码是幂等的（重复执行不会重复挂钩），`$?` 第一时间捕获、再原样交还，所以你原有的 `PROMPT_COMMAND`（包括 bash 5.1+ 的数组形式）、zsh `precmd` 钩子以及 conda 的 `(env)` 前缀、彩色/多行 `PS1` 都照常工作——它完全不改 `PS1`。想永久生效就把 `duoterm integrate --print` 的输出放到服务器 `~/.bashrc` / `~/.zshrc` 的**最后**。
 - **防止抢键盘**：执行前检查光标所在行是不是“空闲提示符”（默认匹配以 `$`、`#`、`%` 结尾），你正在输入一半、有程序在跑、开着 vim 时都会拒绝，并提示 Agent 先看屏幕。执行期间 tmux 状态栏会显示红色 `AGENT RUNNING: …`。
-- **看到你做了什么**：`tmux pipe-pane` 把终端原始输出流写进 `~/.duoterm/<会话>.log`；`read --new` 按游标读取增量并清理颜色码、退格、`\r` 进度条。
+- **看到你做了什么**：`tmux pipe-pane` 把终端原始输出流写进 `~/.duoterm/<会话>.log`；`read --new` 按游标读取增量并清理颜色码、退格、`\r` 进度条和 OSC 序列（写到一半的转义序列留到下次再读，不会留下残片）。装了 integration 时，你自己敲的命令在 `read --new` / `context` 里也会带上 `[exit N]`。
 - **交互程序**：`run` 只用于普通 shell 命令；vim / top / sudo 密码 / y/n 用 `screen` + `type` / `keys`。
 - **长任务**：`run` 超时返回“still running”（退出码 124），之后 `duoterm wait` 接着等，或 `duoterm keys C-c` 中断（中断后 `wait` 返回 `[exit 130]`，下一条 `run` 不会被卡住）。
 
@@ -111,8 +121,12 @@ Agent 接上之后，相当于拿到了你服务器上的 shell，请认真对�
 
 - 空闲检测靠提示符结尾字符。fish（`>`）或自定义提示符请设 `DUOTERM_PROMPT_RE`，例如 `export DUOTERM_PROMPT_RE='[$#%>]$'`；不确定时 Agent 可以用 `--force` 跳过（会同时跳过危险命令检查，所以默认需要你确认）。
 - 远端如果是 PowerShell / cmd 而不是 bash/zsh/sh，`run` 的标记写法不适用，只能用 `type` / `keys` / `screen`。
+- shell integration 只支持 bash ≥ 4.4（需要 `PS0`）和 zsh；更老的 bash 里设置代码什么都不做，sh/dash/fish 里会报语法错误（无害）。这些情况下 `run` 继续用可见的 printf 标记。
+- integration 只对执行过设置代码的那个 shell 生效（判断用的变量故意不 export）：进了子 shell、`sudo -i` 或再 ssh 一层时会回退到 printf 标记，需要的话在那里再 `duoterm integrate` 一次。
+- zsh 默认不忽略以空格开头的命令，`duoterm integrate` 那一行会进 zsh 的 history（`setopt HIST_IGNORE_SPACE` 可避免）。设置代码要放在 rc 文件最后：如果之后别的工具把自己的钩子插到最前面且不保留 `$?`，`D` 里的退出码可能不准。
+- 依赖 tmux `pipe-pane` 原样转发 OSC 序列（在 tmux 3.4 上验证过；`-O` 是默认方向，不需要额外参数）。如果某个环境里日志里看不到 OSC 133 标记，`status` 会显示 `shell_integration: False`，`run` 自动回退。
 - Agent 是“一问一答”的，不会持续盯着屏幕：它在你下一次跟它说话、或它自己调用 `read` 时才看到新内容（Claude Code 的 hook 会自动帮你做这一步）。
-- 你会在 SSH 终端里看到 Agent 命令后面带着一段 `printf '__RT_…'` 标记，这是正常的。
+- 没装 shell integration 时，你会在 SSH 终端里看到 Agent 命令后面带着一段 `printf '__RT_…'` 标记，这是正常的；`duoterm integrate` 后就没有了。
 - 想让远程上的长任务在网络断开后继续跑，可以在远程里再开一层 tmux/screen（记得改前缀键避免冲突），或者用 `nohup`。
 - `scripts/*.ps1` 和 Windows Terminal 配置没有在真实 Windows 上自动化测试过；核心功能在 Linux（WSL 同理）上通过本地 bash 和真实 SSH 连接测试过。
 
@@ -123,4 +137,6 @@ pip install -e '.[mcp,test]'
 pytest            # 每个用例起一个独立的 tmux server（tmux -L），用本地 bash 代替 ssh，不影响你自己的 tmux
 ```
 
-代码结构：`duoterm/tmux.py`（tmux 调用封装）、`duoterm/core.py`（run / wait / 空闲检测 / 日志）、`duoterm/cli.py`（命令行）、`duoterm/mcp_server.py`（MCP）。
+代码结构：`duoterm/tmux.py`（tmux 调用封装）、`duoterm/core.py`（run / wait / 空闲检测 / 日志）、`duoterm/shell_integration.py`（OSC 133 设置代码）、`duoterm/cli.py`（命令行）、`duoterm/mcp_server.py`（MCP）。
+
+测试里有 zsh 时会把 shell integration 的用例在 bash 和 zsh 上各跑一遍，没装 zsh 则跳过 zsh 部分。

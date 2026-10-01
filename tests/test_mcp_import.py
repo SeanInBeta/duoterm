@@ -14,5 +14,5 @@ def test_mcp_server_imports_and_registers_tools():
 
     assert anyio.run(tool_names) == {
         "terminal_status", "terminal_run", "terminal_type", "terminal_keys",
-        "terminal_screen", "terminal_read", "terminal_wait",
+        "terminal_screen", "terminal_read", "terminal_wait", "terminal_integrate",
     }

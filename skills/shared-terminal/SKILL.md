@@ -15,7 +15,8 @@ Otherwise use the `duoterm` CLI through your shell tool.
 
 ## Workflow
 
-1. `duoterm status` - is the session there, idle at a prompt, anything still running?
+1. `duoterm status` - is the session there, idle at a prompt, anything still running, and is
+   `shell_integration` on? (See "Shell integration" below.)
 2. `duoterm read --new` - what happened since you last looked, including what the user typed.
    Do this first whenever the user refers to "that", "the error", "what I just did".
 3. `duoterm run "<command>"` - run one shell command at the idle prompt. Prints the output and
@@ -27,6 +28,19 @@ Otherwise use the `duoterm` CLI through your shell tool.
    `duoterm screen` to look, then `duoterm type "text" --enter` and `duoterm keys Escape C-c Enter Up q ...`.
    Never wrap these in `duoterm run`.
 5. Something the user started: `duoterm wait --pattern 'regex'` or `duoterm wait --idle 3`.
+
+## Shell integration
+
+With `shell_integration: True`, `duoterm run` types only the command; the shell's invisible OSC 133
+marks tell duoterm when it finished and with which exit code. With `False` (not set up, or you are in
+a nested shell / `sudo -i` / another ssh hop), `run` falls back to appending a visible
+`; printf '\n__RT_%s_%d__\n' <id> $?` marker, which clutters the user's screen but works the same.
+
+- If it is `False` at the user's normal prompt, suggest they run `duoterm integrate` (once per login,
+  bash >= 4.4 or zsh), or ask for approval and run it yourself; it types one setup line and erases it.
+- To make it permanent, `duoterm integrate --print` prints the code for the server's
+  `~/.bashrc` / `~/.zshrc` (at the end of the file).
+- Do not try to "fix" the fallback by other means; both modes return output + `[exit N]` the same way.
 
 ## Rules
 

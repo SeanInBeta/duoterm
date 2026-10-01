@@ -185,3 +185,10 @@ def test_start_does_not_nest_ssh_into_existing_session(term):
     msg = term.start("somehost")
     assert "ssh not re-sent" in msg
     assert "ssh somehost" not in term.read(10)
+
+
+def test_idle_check_survives_wrapped_lines(term):
+    long_word = "x" * 450  # wider than the 200-column pane: wraps over three rows
+    assert term.run(f"echo {long_word}").output == long_word
+    assert term.is_idle() == (True, "$")
+    assert term.run("echo after-wrap").output == "after-wrap"

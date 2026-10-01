@@ -8,6 +8,7 @@ import os
 import sys
 
 from . import __version__
+from . import shell_integration as si
 from . import tmux as tm
 from .core import Result, DuotermError, Terminal
 
@@ -19,6 +20,10 @@ typical agent loop:
   duoterm screen                 look at the screen (vim, top, prompts, ...)
   duoterm type "y" --enter       answer an interactive prompt
   duoterm keys C-c               interrupt
+
+once per login (needs bash >= 4.4 or zsh on the server):
+  duoterm integrate              invisible OSC 133 marks: `run` no longer leaves a printf marker on screen
+  duoterm integrate --print      the same setup code, to append to ~/.bashrc or ~/.zshrc
 
 exit codes: command's own exit code for `run`; 124 still running; 125 duoterm error.
 """
@@ -62,7 +67,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("attach", help="attach this terminal to the shared session (for the human)")
     sub.add_parser("stop", help="kill the shared session")
-    sub.add_parser("status", help="session state: idle at prompt? pending agent command?")
+    sub.add_parser("status", help="session state: idle at prompt? pending agent command? shell integration?")
+
+    i = sub.add_parser("integrate", help="set up invisible shell integration (OSC 133) in the shared shell")
+    i.add_argument("--print", dest="print_only", action="store_true", help="only print the setup code (for ~/.bashrc / ~/.zshrc)")
+    i.add_argument("--force", action="store_true", help="send it even if the terminal does not look idle")
 
     r = sub.add_parser("run", help="run a shell command and return its output + exit code")
     r.add_argument("command", nargs="+", help="command line (quote it, or pass words)")
@@ -98,6 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.cmd == "integrate" and args.print_only:
+        return _emit_text(args, si.script().rstrip("\n"))
     term = Terminal(session=args.session)
     try:
         if args.cmd == "start":
@@ -115,6 +126,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("\n".join(f"{k}: {v}" for k, v in st.items()))
             return 0 if st["exists"] else 125
+        if args.cmd == "integrate":
+            return _emit_text(args, term.integrate(force=args.force))
         if args.cmd == "run":
             command = args.command[0] if len(args.command) == 1 else " ".join(args.command)
             return _emit(args, term.run(command, timeout=args.timeout, force=args.force, max_lines=args.max_lines))
