@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duoterm"
+version = "0.1.0"
+description = "Share one tmux terminal (e.g. an SSH session) between you and any AI agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/SeanInBeta/duoterm"
+Repository = "https://github.com/SeanInBeta/duoterm.git"
+Issues = "https://github.com/SeanInBeta/duoterm/issues"
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.2"]
+test = ["pytest>=7"]
+
+[project.scripts]
+duoterm = "duoterm.cli:main"
+duoterm-mcp = "duoterm.mcp_server:main"
+
+[tool.setuptools]
+packages = ["duoterm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

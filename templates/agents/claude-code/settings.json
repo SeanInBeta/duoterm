@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(duoterm status:*)",
+      "Bash(duoterm read:*)",
+      "Bash(duoterm screen:*)",
+      "Bash(duoterm wait:*)",
+      "mcp__duoterm__terminal_status",
+      "mcp__duoterm__terminal_read",
+      "mcp__duoterm__terminal_screen",
+      "mcp__duoterm__terminal_wait"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "duoterm context --max-lines 80", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+# merge into ~/.hermes/config.yaml
+mcp_servers:
+  duoterm:
+    command: duoterm-mcp
+    args: []

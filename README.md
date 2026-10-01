@@ -1,0 +1,124 @@
+# duoterm：你和 AI Agent 共用同一个 SSH 终端
+
+一个终端开 Agent（Claude Code / Codex CLI / OpenCode / Hermes / OpenClaw / 自己写的 Python Agent 都行），另一个终端 SSH 到服务器。你在 SSH 终端里照常敲命令；Agent 能看到这个终端里的全部输入输出，也能直接在里面执行命令，而你会实时看到它在打什么。
+
+```
+Windows Terminal（左右分屏）
+┌──────────────────────────────┬──────────────────────────────────────┐
+│ Agent（Claude Code / Codex…） │ duoterm attach   ← 你在这里手动敲命令   │
+│                              │ rtuser@server:~$ df -h                │
+│  调用 duoterm / MCP 工具 ─────────▶ tmux 会话 "remote"（在 WSL 里）     │
+│  run / read / screen / keys  │   └─ bash → ssh myserver               │
+└──────────────────────────────┴──────────────────────────────────────┘
+                                   └─ 所有输出同时写入 ~/.duoterm/remote.log
+```
+
+## 到底需要装什么？
+
+**只需要装 tmux**（WSL 里再加上本来就有的 Python 3.10+ 和 ssh），然后装上这个仓库。
+MCP 和 Skill **不是要另外下载的软件**，而是把同一个能力接到不同 Agent 上的几种方式，本仓库都已经提供：
+
+| 层 | 是什么 | 谁能用 |
+|---|---|---|
+| tmux | 底层的“共享终端”：你 attach 进去打字，程序可以读屏幕、往里发按键 | 所有 |
+| `duoterm` 命令 | 本仓库核心，一个普通命令行工具 | **任何能执行 shell 命令的 Agent**（通用兜底，不依赖 MCP / Skill） |
+| `duoterm-mcp` | MCP server，把功能暴露成 `terminal_run` 等工具 | 支持 MCP 的 Agent：Claude Code、Codex、OpenCode、Hermes… |
+| `skills/shared-terminal/SKILL.md` | Agent Skills 格式的使用说明 | 支持 SKILL.md 的 Agent：Claude Code、Codex、OpenCode、Hermes、OpenClaw… |
+| `templates/AGENTS.md` | 一段纯文字说明 | 什么都不支持的 Agent，贴进 AGENTS.md / 系统提示词即可 |
+
+推荐组合：**duoterm + MCP**（Agent 用起来最稳）；Agent 不支持 MCP 就用 **duoterm + Skill 或 AGENTS.md**。
+
+## 快速开始（Windows + WSL）
+
+以下命令都在 **WSL 的 Ubuntu** 里执行。
+
+```bash
+# 1. 安装（会自动 apt 安装 tmux / python3-venv，然后把 duoterm、duoterm-mcp 放到 ~/.local/bin）
+git clone https://github.com/SeanInBeta/duoterm.git && cd duoterm
+./install.sh            # 加 --skills 会把 Skill 复制到已存在的 Agent 目录（~/.claude/skills 等）
+
+# 2. 配好 SSH 免密登录（Agent 不能、也不应该替你输密码），参考 templates/ssh_config.example
+ssh-keygen -t ed25519 && ssh-copy-id myserver
+
+# 3. 创建共享会话并连上服务器（tmux 会话名默认 remote）
+duoterm start myserver
+
+# 4. 在“SSH 那个终端”里接入这个会话，之后你就在这里手动操作
+duoterm attach
+```
+
+然后在另一个终端（也在 WSL 里）启动你的 Agent，并按下一节把它接上。
+
+Windows Terminal 小技巧：把 `templates/windows-terminal-profile.json` 加到 profile 里，一点就能打开“共享 SSH”标签；`Alt+Shift+D` 分屏，一边 Agent 一边 SSH。
+
+## 接入各个 Agent
+
+挑你的 Agent 支持的方式，配一种就行（各 Agent 的配置路径以它们的官方文档为准）。
+
+| Agent | MCP | Skill 目录 |
+|---|---|---|
+| Claude Code | `claude mcp add duoterm -- duoterm-mcp` | `~/.claude/skills/` |
+| Codex CLI | `codex mcp add duoterm -- duoterm-mcp`，或 `templates/agents/codex/config.toml` | `~/.codex/skills/` 或 `~/.agents/skills/` |
+| OpenCode | `templates/agents/opencode/opencode.json` 合并到 `~/.config/opencode/opencode.json` | `~/.config/opencode/skills/` |
+| Hermes Agent | `templates/agents/hermes/config.yaml` 合并到 `~/.hermes/config.yaml` | `~/.hermes/skills/` |
+| OpenClaw | 按它的 MCP / Skill 机制接入 | `~/.openclaw/skills/` |
+| 自己写的 Python Agent | 能当 MCP client 就接 `duoterm-mcp` | 或直接 `from duoterm.core import Terminal`，见 `templates/agents/python/example_agent_tool.py` |
+| 其他任何 Agent | — | 把 `templates/AGENTS.md` 贴进它的说明文件 / 系统提示词，让它调用 `duoterm` 命令 |
+
+**Claude Code 额外福利**：`templates/agents/claude-code/settings.json` 里配了一个 `UserPromptSubmit` hook（`duoterm context`）。每次你给 Claude 发消息，它会自动把共享终端里“上次以来的新内容”塞进上下文，你直接问“刚才那个报错怎么回事”就行。同一个文件还把只读命令（status / read / screen / wait）设为免确认，`run` / `type` / `keys` 仍需你批准。其他 Agent 如果有类似的“提交前执行命令”的 hook，也可以挂 `duoterm context`。
+
+**Agent 跑在 PowerShell（不在 WSL 里）**：把 `scripts/` 加进 PATH，`duoterm.ps1` 会转发到 WSL；MCP 配置写 `command: wsl.exe, args: ["-e", "bash", "-lc", "exec duoterm-mcp"]`。推荐还是把 Agent 也放进 WSL 跑，最省事。
+
+## 命令一览
+
+| 命令 | 作用 |
+|---|---|
+| `duoterm start [host] [--ssh-arg ARG] [--reconnect]` | 创建 tmux 会话、开启日志并执行 `ssh host`；会话已存在时不会重复 ssh（断线后用 `--reconnect`） |
+| `duoterm attach` | 你自己接入共享会话 |
+| `duoterm status` | 会话是否存在、是否停在空闲提示符、Agent 是否有命令在跑 |
+| `duoterm run "cmd" [-t 秒] [--force]` | 在空闲提示符执行一条命令，返回输出和 `[exit N]` |
+| `duoterm read [-n N]` / `duoterm read --new` | 最近 N 行 / 上次读取以来的新增内容（包括你手打的） |
+| `duoterm screen` | 当前屏幕原样（vim、top、交互提示） |
+| `duoterm type "text" [--enter]` | 原样输入文本（回答 y/n、REPL 输入） |
+| `duoterm keys C-c Enter Escape Up q …` | 发送按键 |
+| `duoterm wait [--pattern RE] [--idle 秒] [-t 秒]` | 等待超时未完成的命令、某段输出出现、或终端回到空闲 |
+| `duoterm context` | 给 hook 用：新内容包在 `<shared-terminal>` 标签里 |
+| `duoterm stop` | 关闭会话 |
+
+通用参数：`-s NAME`（或环境变量 `DUOTERM_SESSION`）选会话，可以同时连多台服务器；`--json` 输出结构化结果。
+退出码：`run` / `wait` 返回远程命令自己的退出码；124 = 还在运行；125 = duoterm 自身错误（没会话、终端忙、命令被拦截）。
+
+## 工作原理（以及解决了哪些坑）
+
+- **共享**：tmux 会话跑在本地 WSL 里，pane 里是 `ssh myserver`。你 `tmux attach` 进去打字；Agent 用 `tmux send-keys` 输入、`tmux capture-pane` 读屏。远程服务器上**不需要装任何东西**。
+- **知道命令何时结束、退出码多少**：`duoterm run` 实际发送的是 `cmd; printf '\n__RT_%s_%d__\n' <随机id> $?`，然后轮询屏幕直到出现 `__RT_<id>_<退出码>__`。屏幕回显里是 `%s/%d` 模板，不会误匹配。读给 Agent 的内容会把这些标记折叠成 `[exit N]`。含注释、多行、结尾 `&` 的命令会自动包成 `{ …\n}` 再加标记。
+- **防止抢键盘**：执行前检查光标所在行是不是“空闲提示符”（默认匹配以 `$`、`#`、`%` 结尾），你正在输入一半、有程序在跑、开着 vim 时都会拒绝，并提示 Agent 先看屏幕。执行期间 tmux 状态栏会显示红色 `AGENT RUNNING: …`。
+- **看到你做了什么**：`tmux pipe-pane` 把终端原始输出流写进 `~/.duoterm/<会话>.log`；`read --new` 按游标读取增量并清理颜色码、退格、`\r` 进度条。
+- **交互程序**：`run` 只用于普通 shell 命令；vim / top / sudo 密码 / y/n 用 `screen` + `type` / `keys`。
+- **长任务**：`run` 超时返回“still running”（退出码 124），之后 `duoterm wait` 接着等，或 `duoterm keys C-c` 中断（中断后 `wait` 返回 `[exit 130]`，下一条 `run` 不会被卡住）。
+
+## 安全
+
+Agent 接上之后，相当于拿到了你服务器上的 shell，请认真对待：
+
+- `duoterm run` 内置一个危险命令拦截表（`rm -rf /`、`mkfs`、`dd of=/dev/…`、`reboot`、停 sshd、清防火墙、`git push --force` 等），命中需要 `--force`；这只是安全带，不是沙箱。真正的控制靠 Agent 自身的权限确认（例如 Claude Code 里不要把 `duoterm run` 加进免确认列表）。
+- 不要让 Agent 输入密码或密钥；需要 sudo 密码时你自己在终端里输。
+- 日志 `~/.duoterm/*.log` 会记录终端里出现过的一切（可能包括敏感输出），目录权限 700、文件 600，不要提交到任何地方；需要时直接删掉。
+
+## 已知限制
+
+- 空闲检测靠提示符结尾字符。fish（`>`）或自定义提示符请设 `DUOTERM_PROMPT_RE`，例如 `export DUOTERM_PROMPT_RE='[$#%>]$'`；不确定时 Agent 可以用 `--force` 跳过（会同时跳过危险命令检查，所以默认需要你确认）。
+- 远端如果是 PowerShell / cmd 而不是 bash/zsh/sh，`run` 的标记写法不适用，只能用 `type` / `keys` / `screen`。
+- Agent 是“一问一答”的，不会持续盯着屏幕：它在你下一次跟它说话、或它自己调用 `read` 时才看到新内容（Claude Code 的 hook 会自动帮你做这一步）。
+- 你会在 SSH 终端里看到 Agent 命令后面带着一段 `printf '__RT_…'` 标记，这是正常的。
+- 想让远程上的长任务在网络断开后继续跑，可以在远程里再开一层 tmux/screen（记得改前缀键避免冲突），或者用 `nohup`。
+- `scripts/*.ps1` 和 Windows Terminal 配置没有在真实 Windows 上自动化测试过；核心功能在 Linux（WSL 同理）上通过本地 bash 和真实 SSH 连接测试过。
+
+## 开发与测试
+
+```bash
+pip install -e '.[mcp,test]'
+pytest            # 每个用例起一个独立的 tmux server（tmux -L），用本地 bash 代替 ssh，不影响你自己的 tmux
+```
+
+代码结构：`duoterm/tmux.py`（tmux 调用封装）、`duoterm/core.py`（run / wait / 空闲检测 / 日志）、`duoterm/cli.py`（命令行）、`duoterm/mcp_server.py`（MCP）。

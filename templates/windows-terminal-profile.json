@@ -1,0 +1,7 @@
+// Windows Terminal -> Settings -> Open JSON file -> "profiles": { "list": [ ... ] }
+// Replace "Ubuntu" with your distro name (wsl -l -v) and myserver with your ssh host.
+{
+  "name": "Shared SSH (duoterm)",
+  "commandline": "wsl.exe -d Ubuntu -- bash -lc \"duoterm start myserver >/dev/null; exec duoterm attach\"",
+  "startingDirectory": "~"
+}
