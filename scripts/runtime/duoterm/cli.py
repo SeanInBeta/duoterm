@@ -65,10 +65,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ssh-arg", action="append", default=[], help="extra ssh argument (repeatable)")
     s.add_argument("--command", help="initial command for a new pane (default: your login shell)")
     s.add_argument("--reconnect", action="store_true", help="session exists but ssh dropped: send ssh again")
+    s.add_argument("--adopt", action="store_true", help="explicitly adopt an existing tmux session after confirming it")
 
     sub.add_parser("attach", help="attach this terminal to the shared session (for the human)")
     sub.add_parser("stop", help="kill the shared session")
     sub.add_parser("status", help="session state: idle at prompt? pending agent command? shell integration?")
+    sub.add_parser("list", help="discover managed shared terminals without creating or attaching sessions")
+    d = sub.add_parser("doctor", help="explicit environment checks, without installation or repair")
+    d.add_argument("--smoke", action="store_true", help="also test commands in an isolated temporary tmux server")
 
     i = sub.add_parser("integrate", help="set up invisible shell integration (OSC 133) in the shared shell")
     i.add_argument("--print", dest="print_only", action="store_true", help="only print the setup code (for ~/.bashrc / ~/.zshrc)")
@@ -103,17 +107,33 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("context", help="new activity wrapped in <shared-terminal> tags (for prompt hooks)")
     c.add_argument("--cursor", default="hook")
     c.add_argument("--max-lines", type=int, default=80)
+    for command_parser in sub.choices.values():
+        command_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = build_parser().parse_args(argv)
+    if args.cmd == "doctor":
+        from .setup import doctor
+        report = doctor(smoke=args.smoke)
+        print(json.dumps(report, ensure_ascii=False) if args.json else "\n".join(
+            f"{item['name']}: {'PASS' if item['ok'] else 'FAIL'} {item['detail']}" for item in report["checks"]))
+        return 0 if report["ok"] else 125
     if args.cmd == "integrate" and args.print_only:
         return _emit_text(args, si.script().rstrip("\n"))
-    term = Terminal(session=args.session)
     try:
+        term = Terminal(session=args.session)
         if args.cmd == "start":
-            return _emit_text(args, term.start(args.host, args.ssh_arg, args.command, args.reconnect))
+            return _emit_text(args, term.start(args.host, args.ssh_arg, args.command, args.reconnect, args.adopt))
+        if args.cmd == "list":
+            sessions = term.list_sessions()
+            if args.json:
+                print(json.dumps({"status": "done", "sessions": sessions}, ensure_ascii=False))
+            else:
+                print("\n".join(f"{s['session']}: attached={s['attached']} idle={s['idle_at_prompt']} connection={s['connection_state']}" for s in sessions) or "No shared terminals. Open WSL and run duoterm start, then duoterm attach.")
+            return 0
         if args.cmd == "attach":
             term.ensure()
             cmd = tm._base_cmd() + ["attach", "-t", f"={term.session}"]

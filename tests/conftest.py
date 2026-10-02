@@ -1,13 +1,15 @@
 import os
 import shutil
+import shlex
 import subprocess
 import uuid
+from pathlib import Path
 
 import pytest
 
 from duoterm.core import Terminal
 
-SHELL = "env PS1='$ ' HISTFILE=/dev/null bash --norc --noprofile"
+SHELL = "env PS1='$ ' HISTFILE=/dev/null " + shlex.quote(os.environ.get("DUOTERM_TEST_BASH", "bash")) + " --norc --noprofile"
 SHELLS = {
     "bash": SHELL,
     # bash < 4.4 (no PS0, e.g. CentOS 7's 4.2) mode of the integration, forced on this bash.
@@ -16,9 +18,19 @@ SHELLS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def runtime_import_path(monkeypatch):
+    # pytest's pythonpath setting does not propagate to subprocess CLI checks.
+    runtime = str(Path(__file__).resolve().parents[1] / "scripts" / "runtime")
+    monkeypatch.setenv("PYTHONPATH", runtime + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+
 def _terminal(tmp_path, monkeypatch, command):
+    if shutil.which("tmux") is None:
+        pytest.skip("tmux runtime tests require Linux/WSL")
     socket = f"duoterm-test-{uuid.uuid4().hex[:8]}"
     monkeypatch.setenv("DUOTERM_TMUX_SOCKET", socket)
+    monkeypatch.setenv("DUOTERM_TMUX_CONFIG", "/dev/null")
     monkeypatch.delenv("DUOTERM_SESSION", raising=False)
     monkeypatch.delenv("DUOTERM_PROMPT_RE", raising=False)
     # Tests opt in to automatic shell integration explicitly; by default they cover the printf marker.
@@ -53,7 +65,10 @@ def shell_term(request, tmp_path, monkeypatch):
 @pytest.fixture
 def integrated(shell_term):
     """A bash/zsh terminal with duoterm's shell integration installed."""
-    assert "integration active" in shell_term.integrate()
+    message = shell_term.integrate()
+    assert "integration active" in message, (
+        message + "\n" + shell_term.screen() + "\n" + repr(shell_term.log_path.read_bytes()[-3500:])
+    )
     return shell_term
 
 

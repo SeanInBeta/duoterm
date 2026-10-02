@@ -169,11 +169,13 @@ def test_custom_prompts_keep_working(term, setup, last_line):
 def test_timeout_then_wait(integrated):
     from duoterm import tmux as tm
 
-    r = integrated.run("sleep 1.5; echo late", timeout=0.3)
+    release = integrated.home / "release-integrated"
+    r = integrated.run(f"while [ ! -f {release} ]; do sleep 0.05; done; echo late", timeout=0.3)
     assert r.status == "running" and r.process_exit == 124
     assert "AGENT CMD STILL RUNNING" in tm.get_option(integrated.session, "status-right")
     with pytest.raises(DuotermError, match="still running"):
         integrated.run("pwd")
+    release.touch()
     w = integrated.wait(timeout=10)
     assert (w.status, w.exit_code, w.output) == ("done", 0, "late")
     assert tm.get_option(integrated.session, "status-right") == ""

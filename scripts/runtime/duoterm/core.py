@@ -1,7 +1,7 @@
 """Shared-terminal logic: run commands with completion markers, read output, wait, guard.
 
 The terminal is a tmux pane (usually running `ssh host`). A human attaches to it with
-`tmux attach`; agents drive it through this module (via the CLI or the MCP server).
+`tmux attach`; agents drive it through this module via the CLI.
 
 How `run` knows a command finished:
 - shell integration active (see shell_integration.py): only the command is typed; the shell's
@@ -267,6 +267,8 @@ def _parse_osc_run(raw: bytes, echo_lines: int) -> tuple[str, int | None]:
 class Terminal:
     def __init__(self, session: str | None = None, home: str | os.PathLike | None = None):
         self.session = session or os.environ.get("DUOTERM_SESSION") or DEFAULT_SESSION
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", self.session):
+            raise DuotermError("session names must contain only letters, digits, underscores or hyphens")
         self.home = Path(home or os.environ.get("DUOTERM_HOME") or Path.home() / ".duoterm")
         self.prompt_re = re.compile(os.environ.get("DUOTERM_PROMPT_RE") or DEFAULT_PROMPT_RE)
 
@@ -328,11 +330,17 @@ class Terminal:
         ssh_args: list[str] | None = None,
         command: str | None = None,
         reconnect: bool = False,
+        adopt: bool = False,
     ) -> str:
         created = False
         if not self.exists():
             tm.new_session(self.session, command, HISTORY_LIMIT, term=os.environ.get("DUOTERM_TERM", DEFAULT_TERM))
             created = True
+        elif tm.get_option(self.session, "@duoterm") != "1" and not adopt:
+            raise DuotermError("existing session is not managed by duoterm; confirm its identity, then use start --adopt")
+        tm.set_option(self.session, "@duoterm", "1")
+        if created or (host and reconnect):
+            tm.set_option(self.session, "@duoterm_target", host or "")
         self._ensure_logging()
         lines = [f"session '{self.session}' {'created' if created else 'already running'}; log: {self.log_path}"]
         if host:
@@ -451,24 +459,54 @@ class Terminal:
         line = tm.capture(self.session, start=cy, end=cy).split("\n")[0].rstrip()
         return bool(self.prompt_re.search(line)), line
 
-    def status(self) -> dict:
+    def status(self, observe_only: bool = False) -> dict:
         if not self.exists():
             return {"session": self.session, "exists": False, "attach": self.attach_command()}
-        self._ensure_logging()
+        if not observe_only:
+            self._ensure_logging()
         info = tm.pane_info(self.session)
         idle, line = self.is_idle()
         pending = self._load_state().get("pending")
+        clients = int(tm.tmux("display-message", "-p", "-t", tm.target(self.session), "#{session_attached}").strip())
+        expected_host = tm.get_option(self.session, "@duoterm_target")
+        foreground = info["pane_current_command"]
+        connection = ("ssh_unknown_target" if foreground == "ssh" else "local") if not expected_host else "unknown"
+        screen = tm.capture(self.session, start=-12)
+        if expected_host:
+            if foreground != "ssh":
+                connection = "disconnected"
+            elif not idle and re.search(r"password:|passphrase|yes/no|verification code", screen, re.I):
+                connection = "awaiting_authentication"
+            elif idle:
+                connection = "ssh_prompt"
+            else:
+                connection = "ssh_busy_or_connecting"
         return {
             "session": self.session,
             "exists": True,
+            "attached_clients": clients,
+            "attached": clients > 0,
+            "connection_state": connection,
+            "expected_host": expected_host or None,
             "idle_at_prompt": idle,
             "current_line": line,
             "local_foreground_command": info["pane_current_command"],
             "pending_agent_command": pending["command"] if pending else None,
-            "shell_integration": self._integration()[0],
+            "shell_integration": self._integration()[0] if self.log_path.exists() else False,
             "log": str(self.log_path),
             "attach": self.attach_command(),
         }
+
+    def list_sessions(self) -> list[dict]:
+        sessions = []
+        for item in tm.list_sessions():
+            if item.get("managed") == "1":
+                terminal = Terminal(item["session"], home=self.home)
+                try:
+                    sessions.append(terminal.status(observe_only=True))
+                except tm.TmuxError:
+                    continue  # The human may close a window during inspection.
+        return sessions
 
     # ----- input -------------------------------------------------------------------
     def type_text(self, text: str, enter: bool = False) -> None:
@@ -565,13 +603,13 @@ class Terminal:
         # Guess the rows the typed line takes if it wraps; then measure, since readline may also
         # scroll it horizontally on one row. Retype with the right count if the guess was off.
         rows = (int(info["cursor_x"]) + len(_integrate_line(9))) // max(int(info["pane_width"]), 1) + 1
-        for _ in range(3):
+        for attempt in range(3):
             tm.send_literal(self.session, _integrate_line(rows))
             used = self._settled_row() - top + 1
-            if used == rows:
+            if used == rows or attempt == 2:
                 break
             tm.send_keys(self.session, "C-u")
-            self._settled_row()
+            top = self._settled_row()
             rows = used
         tm.send_keys(self.session, "Enter")
         deadline = time.time() + timeout
@@ -579,7 +617,9 @@ class Terminal:
             if self._integration()[0] and self.is_idle()[0]:
                 return True
             time.sleep(POLL_INTERVAL)
-        return False
+        # pipe-pane or a slow tmux query may finish during the final poll.
+        # Observe that completed setup once more before classifying it as failed.
+        return self._integration()[0] and self.is_idle()[0]
 
     def _settled_row(self, timeout: float = 2.0) -> int:
         """Absolute cursor row once the shell has stopped redrawing the input line."""
@@ -737,10 +777,16 @@ class Terminal:
         return idle and line == pending["prompt"]
 
     def _capture_from(self, start_abs: int) -> list[str]:
-        history = int(tm.pane_info(self.session)["history_size"])
-        rel = start_abs - history
-        start: int | str = rel if rel >= -history else "-"
-        return tm.capture(self.session, start=start).split("\n")
+        # Output can scroll between reading history_size and capturing the pane.
+        # Retry that snapshot instead of dropping early output with a stale offset.
+        for _ in range(5):
+            history = int(tm.pane_info(self.session)["history_size"])
+            rel = start_abs - history
+            start: int | str = rel if rel >= -history else "-"
+            lines = tm.capture(self.session, start=start).split("\n")
+            if int(tm.pane_info(self.session)["history_size"]) == history:
+                return lines
+        return lines
 
     @staticmethod
     def _output_lines(lines: list[str], marker_id: str) -> list[str]:

@@ -19,6 +19,8 @@ def _base_cmd() -> list[str]:
     if shutil.which("tmux") is None:
         raise TmuxError("tmux is not installed (Ubuntu/WSL: sudo apt install tmux)")
     cmd = ["tmux"]
+    if os.environ.get("DUOTERM_TMUX_CONFIG"):
+        cmd += ["-f", os.environ["DUOTERM_TMUX_CONFIG"]]
     socket = os.environ.get("DUOTERM_TMUX_SOCKET")
     if socket:
         cmd += ["-L", socket]
@@ -35,6 +37,19 @@ def tmux(*args: str, check: bool = True) -> str:
 def has_session(session: str) -> bool:
     proc = subprocess.run(_base_cmd() + ["has-session", "-t", f"={session}"], capture_output=True)
     return proc.returncode == 0
+
+
+def list_sessions() -> list[dict[str, str]]:
+    proc = subprocess.run(
+        _base_cmd() + ["list-sessions", "-F", "#{session_name}\t#{session_attached}\t#{@duoterm}"],
+        capture_output=True, text=True,
+    )
+    if proc.returncode:
+        if "no server running" in proc.stderr or "error connecting" in proc.stderr:
+            return []
+        raise TmuxError(proc.stderr.strip())
+    return [dict(zip(("session", "attached_clients", "managed"), line.split("\t")))
+            for line in proc.stdout.splitlines()]
 
 
 def new_session(

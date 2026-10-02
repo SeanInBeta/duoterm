@@ -1,4 +1,0 @@
-# ~/.codex/config.toml  (or: codex mcp add duoterm -- duoterm-mcp)
-[mcp_servers.duoterm]
-command = "duoterm-mcp"
-# env = { DUOTERM_SESSION = "remote" }

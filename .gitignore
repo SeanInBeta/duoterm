@@ -5,3 +5,6 @@ build/
 dist/
 .venv/
 *.log
+.verification/
+/setup.json
+/setup.md

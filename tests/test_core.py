@@ -49,20 +49,23 @@ def test_run_truncates_long_output(term):
 
 
 def test_timeout_then_wait(term):
-    r = term.run("sleep 1.5; echo late", timeout=0.3)
+    release = term.home / "release-timeout"
+    r = term.run(f"while [ ! -f {release} ]; do sleep 0.05; done; echo late", timeout=0.3)
     assert r.status == "running" and r.process_exit == 124
     with pytest.raises(DuotermError, match="still running"):
         term.run("pwd")
+    release.touch()
     w = term.wait(timeout=10)
     assert w.status == "done" and w.exit_code == 0 and w.output == "late"
     assert term.run("echo next").output == "next"
 
 
 def test_refuses_when_not_idle(term):
-    human_types(term, "sleep 1.5")
+    human_types(term, "sleep 30")
     time.sleep(0.2)
     with pytest.raises(DuotermError, match="not at an idle shell prompt"):
         term.run("pwd")
+    term.keys("C-c")
     assert term.wait(timeout=10, idle=0.3).status == "done"
     assert term.run("echo ok").output == "ok"
 
@@ -125,8 +128,10 @@ def test_wait_for_pattern(term):
 def test_status_bar_is_restored(term):
     from duoterm import tmux as tm
 
-    term.run("sleep 0.6", timeout=0.1)
+    release = term.home / "release-status"
+    term.run(f"while [ ! -f {release} ]; do sleep 0.05; done", timeout=0.1)
     assert "AGENT CMD STILL RUNNING" in tm.get_option(term.session, "status-right")
+    release.touch()
     term.wait(timeout=10)
     assert tm.get_option(term.session, "status-right") == ""
 
